@@ -4353,6 +4353,19 @@ module atm_time_integration
             h_mom_eddy_visc4   = config_visc4_2dsmag * config_len_disp**3
             h_theta_eddy_visc4 = h_mom_eddy_visc4
 
+            ! 2/7/2018  RRB: modification to add extra damping near the model top
+            ! 7/6/2018  RRB: testing if the changing the coefficient helps w/ hemispheric asymmetries 
+            ! 9/17/2018 RRB: changing back to 2.0 to see if it has any effects on equatorial winds
+            ! additional absorbing layer 2nd-order mixing, test formulation ****************                                            
+
+            do iCell = cellStart, cellEnd
+              do k = nVertLevels - 5, nVertlevels
+                kdiff(k,iCell) = 2.0*config_len_disp*real(k-(nVertLevels-6))/6.
+              end do
+            end do
+
+            ! end of additional absorbing layer 2nd-order mixing, test formulation ****************
+
          else if(config_horiz_mixing == "2d_fixed") then
 
             kdiff(1:nVertLevels,cellStart:cellEnd) = config_h_theta_eddy_visc2

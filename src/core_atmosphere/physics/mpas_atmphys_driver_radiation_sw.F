@@ -318,6 +318,7 @@
 
 !local pointers:
  logical,pointer:: config_o3climatology
+ logical,pointer:: config_equinox
  character(len=StrKIND),pointer:: radt_sw_scheme
  character(len=StrKIND),pointer:: microp_scheme
  logical,pointer:: config_microp_re
@@ -333,6 +334,7 @@
 !-----------------------------------------------------------------------------------------------------------------
 
  call mpas_pool_get_config(configs,'config_o3climatology' ,config_o3climatology)
+ call mpas_pool_get_config(configs,'config_equinox',config_equinox)
  call mpas_pool_get_config(configs,'config_radt_sw_scheme',radt_sw_scheme      )
  call mpas_pool_get_config(configs,'config_microp_scheme' ,microp_scheme       )
  call mpas_pool_get_config(configs,'config_microp_re'     ,config_microp_re    )
@@ -362,7 +364,7 @@
     xlat_p(i,j)       = latCell(i) / degrad
     xlon_p(i,j)       = lonCell(i) / degrad
 
-    sfc_albedo_p(i,j) = sfc_albedo(i)
+    sfc_albedo_p(i,j) = sfc_albedo(i) !RRB: change here for RCEMIP
     snow_p(i,j)       = snow(i)
     tsk_p(i,j)        = skintemp(i)
     xice_p(i,j)       = xice(i)
@@ -460,7 +462,7 @@
        enddo
 
        !ozone volume mixing ratio:
-       if(config_o3climatology) then
+       if(config_o3climatology .or. config_equinox) then
           do k = 1, num_oznLevels
              pin_p(k) = pin(k)
           enddo
@@ -697,6 +699,8 @@
 
 !local pointers:
  logical,pointer:: config_o3climatology
+!Added by RRB
+ logical,pointer:: config_equinox
  character(len=StrKIND),pointer:: radt_sw_scheme
 
 !local variables:
@@ -708,6 +712,8 @@
 
  call mpas_pool_get_config(configs,'config_o3climatology' ,config_o3climatology)
  call mpas_pool_get_config(configs,'config_radt_sw_scheme',radt_sw_scheme      )
+!Added by RRB
+ call mpas_pool_get_config(configs,'config_equinox',config_equinox)
 
  xtime_m = xtime_s/60.
 
@@ -719,15 +725,21 @@
 !$OMP SINGLE
 !... calculates solar declination:
 !call radconst(declin,solcon,julday,degrad,dpd)
- call radconst(declin,solcon,curr_julday,degrad,dpd)
+!Added by RRB: option to have perpetual equinox (declination angle = 0, solar constant = constant)
+ if (config_equinox) then
+   declin=0.
+   solcon=solcon_0
+ else
+   call radconst(declin,solcon,curr_julday,degrad,dpd)
+ end if
 !call mpas_log_write('     ITIMESTEP   = $i', intArgs=(/itimestep/))
-!call mpas_log_write('     YEAR        = $i', intArgs=(/year/))
-!call mpas_log_write('     JULDAY      = $i', intArgs=(/julday/))
-!call mpas_log_write('     GMT         = $r', realArgs=(/gmt/))
+call mpas_log_write('     YEAR        = $i', intArgs=(/year/))
+call mpas_log_write('     JULDAY      = $i', intArgs=(/julday/))
+call mpas_log_write('     GMT         = $r', realArgs=(/gmt/))
 !call mpas_log_write('     XTIME_M     = $r', realArgs=(/xtime_m/))
 !call mpas_log_write('     CURR_JULDAY = $r', realArgs=(/curr_julday/))
-!call mpas_log_write('     SOLCON      = $r', realArgs=(/solcon/))
-!call mpas_log_write('     DECLIN      = $r', realArgs=(/declin/))
+call mpas_log_write('     SOLCON      = $r', realArgs=(/solcon/))
+call mpas_log_write('     DECLIN      = $r', realArgs=(/declin/))
 !$OMP END SINGLE
 
 !... convert the radiation time_step to minutes:
@@ -738,7 +750,8 @@
 
     case ("rrtmg_sw")
        o3input = 0
-       if(config_o3climatology) o3input = 2
+       if(config_o3climatology .or. config_equinox) o3input = 2 !Added by RRB: also when using equinox
+       call mpas_log_write('     O3INPUT      = $i', intArgs=(/o3input/))
 
        call mpas_timer_start('RRTMG_sw')
        call rrtmg_swrad( &

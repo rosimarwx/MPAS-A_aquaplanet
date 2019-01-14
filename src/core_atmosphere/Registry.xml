@@ -1747,6 +1747,10 @@
                      description="logical for configuration of input ozone data in RRMTG long- and short-wave radiation"
                      possible_values=".true. for using monthly-varying ozone data; .false. for using fixed vertical profile"/>
 
+                <nml_option name="config_equinox" type="logical" default_value="false" in_defaults="false"
+                     units="-"
+                     description="logical for configuration of perpetual equinox"
+                     possible_values=".true. for using constant declination angle (zero) and solar constant (solcon_0); .false. for using time-varying declination angle and solar constant"/>
                 <nml_option name="config_microp_re" type="logical" default_value="false" in_defaults="false"
                      units="-"
                      description="logical for calculation of the effective radii for cloud water, cloud ice, and snow"

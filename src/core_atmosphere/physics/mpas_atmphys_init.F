@@ -92,7 +92,8 @@
 
 !local pointers:
  logical,pointer:: config_do_restart,       &
-                   config_o3climatology
+                   config_o3climatology,    &
+                   config_equinox
 
  character(len=StrKIND),pointer::            &
                    config_lsm_scheme,        &
@@ -139,6 +140,7 @@
 
  call mpas_pool_get_config(configs,'config_do_restart'       ,config_do_restart       )
  call mpas_pool_get_config(configs,'config_o3climatology'    ,config_o3climatology    )
+ call mpas_pool_get_config(configs,'config_equinox'          ,config_equinox    )
  call mpas_pool_get_config(configs,'config_lsm_scheme'       ,config_lsm_scheme       )
  call mpas_pool_get_config(configs,'config_microp_scheme'    ,config_microp_scheme    )
  call mpas_pool_get_config(configs,'config_convection_scheme',config_convection_scheme)
@@ -343,6 +345,10 @@
 !read the input files that contain the monthly-mean ozone climatology on fixed pressure levels:
  if(config_o3climatology .and. (.not. config_do_restart)) &
     call init_o3climatology(mesh,atm_input)
+
+!--------- RRB: The following condition was added to use hemispheric symmetric ozone --------!
+ if(config_equinox .and. (.not. config_o3climatology) .and. (.not. config_do_restart)) &
+    call init_o3_ape(mesh,atm_input,diag_physics)
 
 !initialization of global surface properties. set here for now, but may be moved when time
 !manager is implemented:

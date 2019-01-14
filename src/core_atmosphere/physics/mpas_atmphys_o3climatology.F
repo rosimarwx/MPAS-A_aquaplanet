@@ -20,7 +20,8 @@
  private
  public:: init_o3climatology,          &
           update_o3climatology,        &
-          o3climatology_from_MPAS
+          o3climatology_from_MPAS,     &
+          init_o3_ape !added by RRB to use hemispheric symmetric ozone
 
  integer,parameter:: latsiz = 64
  integer,parameter:: lonsiz = 1
@@ -320,6 +321,150 @@
 !call mpas_log_write('--- end subroutine o3climatology_from_MPAS')
 
  end subroutine o3climatology_from_MPAS
+
+!!!! The following subroutine was added by RRB to add zonally symmetric ozone
+!=================================================================================================================
+ subroutine init_o3_ape(mesh,atm_input,diag_physics)
+!=================================================================================================================
+
+!This subroutine reads in a zonally symmetric ozone distribution
+!for aquaplanet simulations
+
+!input arguments:
+ type(mpas_pool_type),intent(in):: mesh
+
+!inout arguments:
+ type(mpas_pool_type),intent(inout):: atm_input
+ type(mpas_pool_type),intent(inout):: diag_physics
+
+!local pointers:
+ integer, pointer:: nCells,levsiz
+ real(kind=RKIND),dimension(:),pointer:: latCell
+ real(kind=RKIND),dimension(:),pointer:: pin
+ real(kind=RKIND),dimension(:,:),pointer:: o3clim
+
+!local variables:
+ integer,parameter:: open_ok  = 0
+
+ integer:: i,i1,i2,istat,k,j,m
+ integer:: iCell
+ 
+ real(kind=RKIND):: lat,lon,dlat,dlatCell
+ real(kind=RKIND),dimension(latsiz):: lat_ozone
+ real(kind=RKIND),dimension(:,:),allocatable:: ozmixin
+
+!Variables to read in ozone
+ character finame*80,label*120
+ integer :: lato3d  != 64  ! number of data latitudinal grid
+ integer :: layo3d  != 59  ! number of data vertical layers
+ integer :: lvlo3d  != 60  ! number of data vertical layer interfaces
+! real, allocatable :: glat(:)
+ real, allocatable :: gprs(:), galt(:)
+ real, allocatable :: gpri(:), gali(:)
+ real, allocatable :: gdat(:,:)
+ real :: o3vubc, prsubc, altubc
+
+!-----------------------------------------------------------------------------------------------------------------
+!write(0,*)
+!write(0,*) '--- enter subroutine physics_init_o3:'
+
+ call mpas_pool_get_dimension(mesh,'nCells',nCells)
+ call mpas_pool_get_dimension(mesh,'nOznLevels',levsiz)
+
+ call mpas_pool_get_array(atm_input,'pin',pin)
+ call mpas_pool_get_array(diag_physics,'o3clim',o3clim)
+ call mpas_pool_get_array(mesh,'latCell',latCell)
+
+ !!!!Read in ozone data. File name: apeo3.dat, source: http://climate.ncas.ac.uk/ape/ape_ozone.html
+      
+ open (unit=45,file='apeo3.dat',status='old')
+ read (45,'(i3)') lato3d
+
+ read (45,'(i3)') layo3d
+ lvlo3d = 1 + layo3d
+
+ !File has data we don't need...
+ read (45,'(3(1pe12.5))') o3vubc,prsubc,altubc
+
+ allocate(galt(layo3d))
+ allocate(gpri(lvlo3d))
+ allocate(gali(lvlo3d))
+ allocate(ozmixin(latsiz,levsiz))
+
+
+ write(0,*) 'Reading ozone data...'
+ read (45,'(a)') label   ! grid latitudes (deg) --------->
+ read (45,'(10(1pe12.5))') (lat_ozone(j),j=1,lato3d)
+ read (45,'(a)') label   ! layer pressure (mb) ---------->
+ read (45,'(10(1pe12.5))') (pin(k),k=1,layo3d)
+
+ read (45,'(a)') label   ! layer altitude (km) ---------->
+ read (45,'(10(1pe12.5))') (galt(k),k=1,layo3d)
+
+ read (45,'(a)') label   ! interface pressure (mb) ------>
+ read (45,'(10(1pe12.5))') (gpri(k),k=1,lvlo3d)
+
+ read (45,'(a)') label   ! interface altitude (km) ------>
+ read (45,'(10(1pe12.5))') (gali(k),k=1,lvlo3d)
+
+ read (45,'(a)') label   ! o3 vmr (ppmv) lat-alt
+ read (45,'(10(1pe12.5))') ((ozmixin(j,k),j=1,latsiz),k=1,levsiz)
+ close(45)
+
+ !Convert from ppmv to mol/mol; 1 ppmv = 1e-6 mol/mol
+ ozmixin = ozmixin*1.e-6
+
+! write(0,*) gdat
+
+
+!INTERPOLATION OF INPUT OZONE DATA TO MPAS GRID:
+!write(0,*) 'max latCell=', maxval(latCell)/degrad
+!write(0,*) 'min latCell=', minval(latCell)/degrad
+!write(0,*) 'max lonCell=', maxval(lonCell)/degrad
+!write(0,*) 'min lonCell=', minval(lonCell)/degrad
+!write(0,*)
+!write(0,*) 'max lat_ozone=',maxval(lat_ozone)
+!write(0,*) 'min lat_ozone=',minval(lat_ozone)
+ do iCell = 1,nCells
+    lat = latCell(iCell)/degrad
+    if(lat .gt. lat_ozone(latsiz)) then
+     i1 = latsiz
+     i2 = latsiz
+    elseif(lat .lt. lat_ozone(1)) then
+       i1 = 1
+       i2 = 1
+   else
+       do i = 1, latsiz
+          if(lat.ge.lat_ozone(i) .and. lat.lt.lat_ozone(i+1)) exit
+       enddo
+       i1 = i
+       i2 = i+1
+    endif
+
+    do k = 1,levsiz
+       dlat     = lat_ozone(i2)-lat_ozone(i1)
+       dlatCell = lat-lat_ozone(i1)
+       if(dlat == 0.) then
+          o3clim(k,iCell) = ozmixin(i1,k)
+       else
+          o3clim(k,iCell) = ozmixin(i1,k) &
+                     + (ozmixin(i2,k)-ozmixin(i1,k))*dlatCell/dlat
+       endif
+    enddo 
+!   do k = 1, levsiz
+!      write(0,102) iCell,i1,i2,lat_ozone(i1),lat,lat_ozone(i2),ozmixin(1,k,i1,1), &
+!                   ozmixm(1,k,iCell),ozmixin(1,k,i2,1)
+!   enddo
+ enddo
+ deallocate(ozmixin)
+
+! write(0,*) '--- end subroutine init_o3_ape.'
+
+!formats:
+ 101 format(i3,12(1x,e15.8))
+ 102 format(i6,i6,i6,6(1x,e15.8))
+
+ end subroutine init_o3_ape
 
 !=================================================================================================================
  end module mpas_atmphys_o3climatology

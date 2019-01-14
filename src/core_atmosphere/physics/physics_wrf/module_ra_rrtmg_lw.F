@@ -10935,7 +10935,7 @@ use module_wrf_error
 ! Set iaer to select aerosol option
 ! iaer = 0, no aerosols
 ! icld = 10, input total aerosol optical depth (tauaer) directly
-      iaer = 10
+      iaer = 0 !RRB - changed here for no aerosols
 
 ! Call model and data initialization, compute lookup tables, perform
 ! reduction of g-points from 256 to 140 for input absorption coefficient 

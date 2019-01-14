@@ -76,8 +76,9 @@
  real(kind=RKIND),parameter:: psat    = 610.78
 
 !constants specific to long- and short-wave radiation codes:
-!real(kind=RKIND),parameter:: solcon_0 = 1365.          !solar constant                                     [W/m2]
- real(kind=RKIND),parameter:: solcon_0 = 1370.          !solar constant                                     [W/m2]
+! ------ RRB: using 1365 as in the APE -------!
+real(kind=RKIND),parameter:: solcon_0 = 1365.          !solar constant                                     [W/m2]
+! real(kind=RKIND),parameter:: solcon_0 = 1370.          !solar constant                                     [W/m2]
  real(kind=RKIND),parameter:: degrad   = 3.1415926/180. !conversion from degree to radiant                     [-]
  real(kind=RKIND),parameter:: dpd      = 360./365.
 

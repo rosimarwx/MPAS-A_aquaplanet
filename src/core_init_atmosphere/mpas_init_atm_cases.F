@@ -97,8 +97,31 @@ module init_atm_cases
       end if
 
 
+      !-------- Modified by RRB to add an aquaplanet simulation ----------!
+      if (config_init_case == 0) then
 
-      if ((config_init_case == 1) .or. (config_init_case == 2) .or. (config_init_case == 3)) then
+         write(0,*) ' Aquaplanet test case '
+         block_ptr => domain % blocklist
+         do while (associated(block_ptr))
+
+            call mpas_pool_get_config(block_ptr % configs, 'config_static_interp', config_static_interp)
+            call mpas_pool_get_config(block_ptr % configs, 'config_met_interp', config_met_interp)
+
+            call mpas_pool_get_subpool(block_ptr % structs, 'mesh', mesh)
+            call mpas_pool_get_subpool(block_ptr % structs, 'state', state)
+            call mpas_pool_get_subpool(block_ptr % structs, 'diag', diag)
+            call mpas_pool_get_subpool(block_ptr % structs, 'fg', fg)
+
+            call mpas_pool_get_dimension(block_ptr % dimensions, 'nCells', nCells)
+            call mpas_pool_get_dimension(block_ptr % dimensions, 'nVertLevels', nVertLevels)
+
+            call mpas_log_write(' calling test case setup ')
+            call init_atm_case_ape(mesh, nCells, nVertLevels, state, diag, fg, block_ptr % configs, config_init_case)
+            call decouple_variables(mesh, nCells, nVertLevels, state, diag)
+            call mpas_log_write(' returned from test case setup ')
+            block_ptr => block_ptr % next
+         end do
+      else if ((config_init_case == 1) .or. (config_init_case == 2) .or. (config_init_case == 3)) then
 
          call mpas_log_write(' Jablonowski and Williamson baroclinic wave test case ')
          if (config_init_case == 1) call mpas_log_write(' no initial perturbation ')
@@ -275,13 +298,542 @@ module init_atm_cases
             call mpas_pool_get_subpool(block_ptr % structs, 'mesh', mesh)
             call mpas_pool_get_subpool(block_ptr % structs, 'fg', fg)
 
-            call physics_idealized_init(mesh, fg)
+            call physics_idealized_init(mesh, fg, config_init_case) !Modified by RRB to add test case
 
             block_ptr => block_ptr % next
          end do
       end if
 
    end subroutine init_atm_setup_case
+
+!----------------------------------------------------------------------------------------------------------
+
+   subroutine init_atm_case_ape(mesh, nCells, nVertLevels, state, diag, fg, configs, test_case)
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   ! Setup aquaplanet test case from Neale and Hoskins 2000 (QJRMS)
+   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+      implicit none
+
+      type (mpas_pool_type), intent(inout) :: mesh
+      integer, intent(in) :: nCells, nVertLevels
+      type (mpas_pool_type), intent(inout) :: state
+      type (mpas_pool_type), intent(inout) :: diag
+      type (mpas_pool_type), intent(inout) :: fg
+      type (mpas_pool_type), intent(in) :: configs
+      integer, intent(in) :: test_case
+
+      real (kind=RKIND), parameter :: alpha_grid = 0.  ! no grid rotation
+
+!      real (kind=RKIND), parameter :: omega_e = 7.29212e-05
+      real (kind=RKIND) :: omega_e
+
+      real (kind=RKIND), dimension(:), pointer :: rdzw, dzu, rdzu, fzm, fzp
+      real (kind=RKIND), dimension(:), pointer :: surface_pressure
+      real (kind=RKIND), dimension(:,:), pointer :: zgrid, zxu, zz, hx
+      real (kind=RKIND), dimension(:,:), pointer :: pressure, ppb, pb, rho_zz, rb, rr, tb, rtb, p, pp, dss, t, rt
+      real (kind=RKIND), dimension(:,:), pointer :: u, w, v
+      real (kind=RKIND), dimension(:,:), pointer :: rho, theta
+      real (kind=RKIND), dimension(:,:,:), pointer :: zb, zb3
+      real (kind=RKIND), dimension(:,:,:), pointer :: deriv_two
+
+!.. initialization of moisture:
+      integer, pointer :: index_qv
+      real (kind=RKIND), dimension(:,:,:), pointer :: scalars
+!.. end initialization of moisture.
+
+      integer :: iCell, iCell1, iCell2 , iEdge, ivtx, i, k, nz, cell1, cell2
+      integer, pointer :: nz1, nCellsSolve, nEdges, maxEdges, nVertices
+
+      integer, dimension(:), pointer :: nEdgesOnEdge, nEdgesOnCell
+      integer, dimension(:,:), pointer :: edgesOnEdge, cellsOnEdge, verticesOnEdge, cellsOnCell
+      real (kind=RKIND), dimension(:,:), pointer :: weightsOnEdge
+
+      real (kind=RKIND) :: p0, phi
+
+      real (kind=RKIND) :: ztemp, zd, zt, dz, str
+
+      real (kind=RKIND) :: xnutr
+
+      real (kind=RKIND), dimension(nVertLevels + 1 ) :: sh, zw, ah
+      real (kind=RKIND), dimension(nVertLevels ) :: zu, dzw, rdzwp, rdzwm, tt, zc
+
+      real (kind=RKIND) :: d1, d2, d3, cof1, cof2, psurf
+      real (kind=RKIND), pointer :: cf1, cf2, cf3
+
+      real (kind=RKIND), dimension(:), pointer :: skintemp, sst
+
+      real (kind=RKIND) :: z_edge, z_edge3, d2fdx2_cell1, d2fdx2_cell2
+
+      real (kind=RKIND), dimension(:), pointer :: xCell, yCell, zCell
+      real (kind=RKIND), dimension(:), pointer :: xEdge, yEdge, zEdge
+      real (kind=RKIND), dimension(:), pointer :: xVertex, yVertex, zVertex
+      real (kind=RKIND), dimension(:), pointer :: dcEdge, dvEdge, areaCell, areaTriangle
+      real (kind=RKIND), dimension(:,:), pointer :: kiteAreasOnVertex
+
+      real (kind=RKIND), dimension(:), pointer :: latCell, latVertex, lonVertex, latEdge, lonEdge
+      real (kind=RKIND), dimension(:), pointer :: fEdge, fVertex
+
+      real (kind=RKIND), pointer :: sphere_radius
+      logical, pointer :: on_a_sphere
+      real (kind=RKIND), pointer :: config_coef_3rd_order
+      integer, pointer :: config_theta_adv_order
+      integer, pointer :: config_init_case
+      real (kind=RKIND), pointer :: config_ztop
+
+      !sounding variables
+      real, allocatable :: zsounding(:)
+      real, allocatable :: tsounding(:)
+      real, allocatable :: qsounding(:)
+      real, allocatable :: psounding(:)
+      integer :: nz_sounding, istat, kk
+      character(len=256) :: soundingstr
+
+      call mpas_pool_get_config(configs, 'config_init_case', config_init_case)
+      call mpas_pool_get_config(configs, 'config_coef_3rd_order', config_coef_3rd_order)
+      call mpas_pool_get_config(configs, 'config_theta_adv_order', config_theta_adv_order)
+      call mpas_pool_get_config(configs, 'config_ztop', config_ztop) !Added by RRB to read model top
+
+      !
+      ! Scale all distances and areas from a unit sphere to one with radius sphere_radius
+      !
+      call mpas_pool_get_array(mesh, 'xCell', xCell)
+      call mpas_pool_get_array(mesh, 'yCell', yCell)
+      call mpas_pool_get_array(mesh, 'zCell', zCell)
+      call mpas_pool_get_array(mesh, 'xEdge', xEdge)
+      call mpas_pool_get_array(mesh, 'yEdge', yEdge)
+      call mpas_pool_get_array(mesh, 'zEdge', zEdge)
+      call mpas_pool_get_array(mesh, 'xVertex', xVertex)
+      call mpas_pool_get_array(mesh, 'yVertex', yVertex)
+      call mpas_pool_get_array(mesh, 'zVertex', zVertex)
+      call mpas_pool_get_array(mesh, 'dvEdge', dvEdge)
+      call mpas_pool_get_array(mesh, 'dcEdge', dcEdge)
+      call mpas_pool_get_array(mesh, 'areaCell', areaCell)
+      call mpas_pool_get_array(mesh, 'areaTriangle', areaTriangle)
+      call mpas_pool_get_array(mesh, 'kiteAreasOnVertex', kiteAreasOnVertex)
+      call mpas_pool_get_config(mesh, 'on_a_sphere', on_a_sphere)
+      call mpas_pool_get_config(mesh, 'sphere_radius', sphere_radius)
+
+      xCell(:) = xCell(:) * sphere_radius
+      yCell(:) = yCell(:) * sphere_radius
+      zCell(:) = zCell(:) * sphere_radius
+      xVertex(:) = xVertex(:) * sphere_radius
+      yVertex(:) = yVertex(:) * sphere_radius
+      zVertex(:) = zVertex(:) * sphere_radius
+      xEdge(:) = xEdge(:) * sphere_radius
+      yEdge(:) = yEdge(:) * sphere_radius
+      zEdge(:) = zEdge(:) * sphere_radius
+      dvEdge(:) = dvEdge(:) * sphere_radius
+      dcEdge(:) = dcEdge(:) * sphere_radius
+      areaCell(:) = areaCell(:) * sphere_radius**2.0
+      areaTriangle(:) = areaTriangle(:) * sphere_radius**2.0
+      kiteAreasOnVertex(:,:) = kiteAreasOnVertex(:,:) * sphere_radius**2.0
+
+      call mpas_pool_get_array(mesh, 'weightsOnEdge', weightsOnEdge)
+      call mpas_pool_get_array(mesh, 'nEdgesOnEdge', nEdgesOnEdge)
+      call mpas_pool_get_array(mesh, 'nEdgesOnCell', nEdgesOnCell)
+      call mpas_pool_get_array(mesh, 'edgesOnEdge', edgesOnEdge)
+      call mpas_pool_get_array(mesh, 'cellsOnEdge', cellsOnEdge)
+      call mpas_pool_get_array(mesh, 'cellsOnCell', cellsOnCell)
+      call mpas_pool_get_array(mesh, 'verticesOnEdge', verticesOnEdge)
+      call mpas_pool_get_array(mesh, 'deriv_two', deriv_two)
+      call mpas_pool_get_array(mesh, 'zb', zb)
+      call mpas_pool_get_array(mesh, 'zb3', zb3)
+
+      call mpas_pool_get_dimension(mesh, 'nVertLevels', nz1)
+      call mpas_pool_get_dimension(mesh, 'nCellsSolve', nCellsSolve)
+      call mpas_pool_get_dimension(mesh, 'nVertices', nVertices)
+      call mpas_pool_get_dimension(mesh, 'nEdges', nEdges)
+      call mpas_pool_get_dimension(mesh, 'maxEdges', maxEdges)
+      nz = nz1 + 1
+
+      call mpas_pool_get_array(mesh, 'zgrid', zgrid)
+      call mpas_pool_get_array(mesh, 'rdzw', rdzw)
+      call mpas_pool_get_array(mesh, 'dzu', dzu)
+      call mpas_pool_get_array(mesh, 'rdzu', rdzu)
+      call mpas_pool_get_array(mesh, 'fzm', fzm)
+      call mpas_pool_get_array(mesh, 'fzp', fzp)
+      call mpas_pool_get_array(mesh, 'zxu', zxu)
+      call mpas_pool_get_array(mesh, 'zz', zz)
+      call mpas_pool_get_array(mesh, 'hx', hx)
+      call mpas_pool_get_array(mesh, 'dss', dss)
+
+      call mpas_pool_get_array(diag, 'exner_base', pb)
+      call mpas_pool_get_array(diag, 'rho_base', rb)
+      call mpas_pool_get_array(diag, 'rho_p', rr)
+      call mpas_pool_get_array(diag, 'rho', rho)
+      call mpas_pool_get_array(diag, 'theta_base', tb)
+      call mpas_pool_get_array(diag, 'theta', theta)
+      call mpas_pool_get_array(diag, 'rtheta_base', rtb)
+      call mpas_pool_get_array(diag, 'rtheta_p', rt)
+      call mpas_pool_get_array(diag, 'exner', p)
+      call mpas_pool_get_array(diag, 'pressure_base', ppb)
+      call mpas_pool_get_array(diag, 'pressure_p', pp)
+      call mpas_pool_get_array(diag, 'surface_pressure', surface_pressure)
+      call mpas_pool_get_array(diag, 'v', v)
+
+      call mpas_pool_get_array(state, 'rho_zz', rho_zz)
+      call mpas_pool_get_array(state, 'theta_m', t)
+      call mpas_pool_get_array(state, 'scalars', scalars)
+      call mpas_pool_get_array(state, 'u', u)
+      call mpas_pool_get_array(state, 'w', w)
+
+      call mpas_pool_get_array(mesh, 'latCell', latCell)
+      call mpas_pool_get_array(mesh, 'latVertex', latVertex)
+      call mpas_pool_get_array(mesh, 'lonVertex', lonVertex)
+      call mpas_pool_get_array(mesh, 'latEdge', latEdge)
+      call mpas_pool_get_array(mesh, 'lonEdge', lonEdge)
+      call mpas_pool_get_array(mesh, 'fEdge', fEdge)
+      call mpas_pool_get_array(mesh, 'fVertex', fVertex)
+
+      call mpas_pool_get_array(mesh, 'cf1', cf1)
+      call mpas_pool_get_array(mesh, 'cf2', cf2)
+      call mpas_pool_get_array(mesh, 'cf3', cf3)
+
+      call mpas_pool_get_array(fg, 'skintemp', skintemp)
+      call mpas_pool_get_array(fg, 'sst', sst)
+
+!.. initialization of moisture:
+      scalars(:,:,:) = 0.0
+!.. end initialization of moisture.
+
+      surface_pressure(:) = 0.0
+
+      call atm_initialize_advection_rk(mesh, nCells, nEdges, maxEdges, on_a_sphere, sphere_radius )
+      call atm_initialize_deformation_weights(mesh, nCells, on_a_sphere, sphere_radius)
+
+      call mpas_pool_get_dimension(state, 'index_qv', index_qv) 
+
+      xnutr = 0.0
+      zd = 12000.0
+
+      omega_e = omega
+      p0 = 1.0e+05
+
+      !!----- RRB: hx = terrain height; aquaplanet means hx = 0. everywhere -----!!
+      hx(:,:) = 0.
+
+      !     Metrics for hybrid coordinate and vertical stretching
+
+      str = 1.5
+      zt = config_ztop
+      dz = zt/float(nz1)
+
+      !!----- RRB: this code is the same as in the jw test case -----!!
+      !!----- RRB 9/17/2018: trying to manually specify vertical levels ----!!
+
+!!      zc(:)  = (/0.0, 20.0, 80.0, 180.0, 320.0, 500.0, 720.0, 980.0, 1280.0, 1620.0, 2000.0,&
+!!                            2420.0, 2880.0, 3380.0, 3920.0, 4500.0, 5120.0, 5780.0, 6480.0, 7220.0, &
+!!                            8000.0, 8820.0, 9680.0, 10580.0, 11520.0, 12500.0, 13520.0, 14580.8, 15694.6,&
+!!                            16875.3, 18138.6, 19503.0, 20990.2, 22626.1, 24458.3, 26583.6, 29219.1, 32908.7, 39254.8/)
+
+      do k=1,nz
+
+!           sh(k) is the stretching specified for height surfaces
+
+            sh(k) = (real(k-1)*dz/zt)**str 
+!RRB             sh(k) = 0.5*(zc(min(k,nz-1))+zc(max(k-1,1)))/zt
+!            sh(k) = zc(k)/zt
+!           to specify specific heights zc(k) for coordinate surfaces,
+!           input zc(k) and define sh(k) = zc(k)/zt
+!           zw(k) is the hieght of zeta surfaces
+!                zw(k) = (k-1)*dz yields constant dzeta
+!                        and nonconstant dzeta/dz
+!                zw(k) = sh(k)*zt yields nonconstant dzeta
+!                        and nearly constant dzeta/dz 
+
+            zw(k) = float(k-1)*dz
+!RRB            zw(k) = sh(k)*zt
+!
+!           ah(k) governs the transition between terrain-following 
+!           and pureheight coordinates
+!                ah(k) = 0 is a terrain-following coordinate
+!                ah(k) = 1 is a height coordinate
+ 
+            ah(k) = 1.-cos(.5*pii*(k-1)*dz/zt)**6
+!RRB            ah(k) = 0.
+            call mpas_log_write(' k, sh, zw, ah = $i $r $r $r', intArgs=(/k/), realArgs=(/sh(k),zw(k),ah(k)/))
+      end do
+      do k=1,nz1
+         dzw (k) = zw(k+1)-zw(k)
+         rdzw(k) = 1./dzw(k)
+         zu(k  ) = .5*(zw(k)+zw(k+1))
+      end do
+      do k=2,nz1
+         dzu (k)  = .5*(dzw(k)+dzw(k-1))
+         rdzu(k)  =  1./dzu(k)
+         fzp (k)  = .5* dzw(k  )/dzu(k)
+         fzm (k)  = .5* dzw(k-1)/dzu(k)
+         rdzwp(k) = dzw(k-1)/(dzw(k  )*(dzw(k)+dzw(k-1)))
+         rdzwm(k) = dzw(k  )/(dzw(k-1)*(dzw(k)+dzw(k-1)))
+      end do
+
+
+!**********  how are we storing cf1, cf2 and cf3?
+
+      COF1 = (2.*DZU(2)+DZU(3))/(DZU(2)+DZU(3))*DZW(1)/DZU(2) 
+      COF2 =     DZU(2)        /(DZU(2)+DZU(3))*DZW(1)/DZU(3) 
+      CF1  = FZP(2) + COF1
+      CF2  = FZM(2) - COF1 - COF2
+      CF3  = COF2       
+
+!      d1  = .5*dzw(1)
+!      d2  = dzw(1)+.5*dzw(2)
+!      d3  = dzw(1)+dzw(2)+.5*dzw(3)
+!      cf1 = d2*d3*(d3-d2)/(d2*d3*(d3-d2)+d1*d3*(d1-d3)+d1*d2*(d2-d1))
+!      cf2 = d1*d3*(d1-d3)/(d2*d3*(d3-d2)+d1*d3*(d1-d3)+d1*d2*(d2-d1))
+!      cf3 = d1*d2*(d2-d1)/(d2*d3*(d3-d2)+d1*d3*(d1-d3)+d1*d2*(d2-d1))
+
+      call mpas_log_write(' cf1, cf2, cf3 = $r $r $r', realArgs=(/cf1,cf2,cf3/))
+
+      do iCell=1,nCells
+        do k=1,nz
+          zgrid(k,iCell) = (1.-ah(k))*(sh(k)*(zt-hx(k,iCell))+hx(k,iCell))  &
+                         + ah(k) * sh(k)* zt
+       end do
+        do k=1,nz1
+          zz (k,iCell) = (zw(k+1)-zw(k))/(zgrid(k+1,iCell)-zgrid(k,iCell))
+        end do
+      end do
+
+      do i=1, nEdges
+        iCell1 = cellsOnEdge(1,i)
+        iCell2 = cellsOnEdge(2,i)
+        do k=1,nz1
+          zxu (k,i) = 0.5 * (zgrid(k,iCell2)-zgrid(k,iCell1) + zgrid(k+1,iCell2)-zgrid(k+1,iCell1)) / dcEdge(i)
+        end do
+      end do
+      do i=1, nCells
+        do k=1,nz1
+          ztemp = .5*(zgrid(k+1,i)+zgrid(k,i))
+          dss(k,i) = 0.
+          ztemp = zgrid(k,i)
+          if(ztemp.gt.zd+.1)  then
+             dss(k,i) = dss(k,i)+xnutr*sin(.5*pii*(ztemp-zd)/(zt-zd))**2
+          end if
+        end do
+      end do
+
+      !do k=1,nz1
+      !  write(0,*) ' k, zgrid(k,1),hx(k,1) ',k,zgrid(k,1),hx(k,1)
+      !end do
+
+      !do k=1,nz1
+      !  write(0,*) ' k, zx(k,1) ',k,zx(k,1)
+      !end do
+
+      call mpas_log_write(' grid metrics setup complete ')
+
+      !!----- RRB: the following code was modified to implement a basic aquaplanet -----!!
+
+      ! Initial atmosphere at rest
+      u(:,:) = 0.
+      v(:,:) = 0.
+      w(:,:) = 0.
+
+     !Read vertical profile of theta and qv from a sounding file
+     !First let's see how many levels we have (rows = levels)
+      call mpas_log_write('reading sounding...')
+      open(unit=31,file='sounding.input',status='old')
+      nz_sounding=0
+      do
+        read(31,'(a256)',iostat=istat) soundingstr
+        if ( istat /= 0 )  exit
+        nz_sounding = nz_sounding + 1
+      end do
+      close(31)
+      call mpas_log_write(' no. of vertical levels in sounding: $i',intArgs=(/nz_sounding/))
+
+      !Allocate
+      allocate(zsounding(nz_sounding))
+      allocate(tsounding(nz_sounding))
+      allocate(qsounding(nz_sounding))
+      allocate(psounding(nz_sounding))
+
+      !Finally read data
+      open(unit=31,file='sounding.input',status='unknown')
+      do kk = 1,nz_sounding
+        read(31,*) zsounding(kk),tsounding(kk),qsounding(kk),psounding(kk)
+        write(0,*) zsounding(kk),tsounding(kk),qsounding(kk),psounding(kk)
+      end do
+      close(31)
+      call mpas_log_write('done reading sounding')
+      call mpas_log_write('time to interpolate sounding')
+
+      !Interpolate sounding to model levels - it's best to do this outside the loop for all points
+      do k=1,nz1
+         ztemp    = .5*(zgrid(k+1,1)+zgrid(k,1)) !second index set to 1 b/c APE means same height everywhere
+         if (ztemp < zsounding(1)) then !first level is below first sounding level
+           tb(k,:) = 0.5*(tsounding(1)+tsounding(2))+&
+                     (tsounding(2)-tsounding(1))/(zsounding(2)-zsounding(1))*(ztemp-0.5*(zsounding(1)+zsounding(2)))
+           scalars(index_qv,k,:) = 0.5*(qsounding(1)+qsounding(2))+&
+                     (qsounding(2)-qsounding(1))/(zsounding(2)-zsounding(1))*(ztemp-0.5*(zsounding(1)+zsounding(2)))
+           ppb(k,:) = 0.5*(psounding(1)+psounding(2))+&
+                     (psounding(2)-psounding(1))/(zsounding(2)-zsounding(1))*(ztemp-0.5*(zsounding(1)+zsounding(2)))
+
+         else if (ztemp > zsounding(nz_sounding)) then !last level is above last sounding level
+           tb(k,:) = 0.5*(tsounding(nz_sounding-1)+tsounding(nz_sounding))+&
+                     (tsounding(nz_sounding)-tsounding(nz_sounding-1))/(zsounding(nz_sounding)-zsounding(nz_sounding-1))*(ztemp-0.5*(zsounding(nz_sounding-1)+zsounding(nz_sounding)))
+           scalars(index_qv,k,:) = 0.5*(qsounding(nz_sounding-1)+qsounding(nz_sounding))+&
+                     (qsounding(nz_sounding)-qsounding(nz_sounding-1))/(zsounding(nz_sounding)-zsounding(nz_sounding-1))*(ztemp-0.5*(zsounding(nz_sounding-1)+zsounding(nz_sounding)))
+           ppb(k,:) = 0.5*(psounding(nz_sounding-1)+psounding(nz_sounding))+&
+                     (psounding(nz_sounding)-psounding(nz_sounding-1))/(zsounding(nz_sounding)-zsounding(nz_sounding-1))*(ztemp-0.5*(zsounding(nz_sounding-1)+zsounding(nz_sounding)))
+
+         else
+           kk = 1
+10         kk = kk+1
+           if (zsounding(kk) < ztemp) go to 10
+           tb(k,:) = tsounding(kk-1)+(tsounding(kk)-tsounding(kk-1))/(zsounding(kk)-zsounding(kk-1))*(ztemp-zsounding(kk-1))
+           ppb(k,:) = psounding(kk-1)+(psounding(kk)-psounding(kk-1))/(zsounding(kk)-zsounding(kk-1))*(ztemp-zsounding(kk-1))
+           scalars(index_qv,k,:) = qsounding(kk-1)+(qsounding(kk)-qsounding(kk-1))/(zsounding(kk)-zsounding(kk-1))*(ztemp-zsounding(kk-1))
+         end if
+
+   
+         !Calculate all other variables
+         pb(k,:) = (ppb(k,:)/p0)**(rgas/cp)          !exner_base
+         rb(k,:) =  ppb(k,:)/(rgas*tb(k,:)*pb(k,:)*zz(k,:)) !rho_base [for some reason multiplied by zz]
+         rtb(k,:) = rb(k,:)*tb(k,:)
+         p  (k,:) = pb(k,:)    
+         pp (k,:) = 0.                                !pressure pert
+         rr (k,:) = 0.                                !rho_pert         
+
+         tt(k) = tb(k,1)*pb(k,1)*(1.+1.61*scalars(index_qv,k,1))!using grid point 1, but should be the same everywhere
+         t (k,:) = tt(k)/p(k,:)
+         rt (k,:) = t(k,:)*rr(k,:)+rb(k,:)*(t(k,:)-tb(k,:))
+         rho_zz (k,:) = rb(k,:) + rr(k,:)
+         rho(k,:) = rho_zz(k,:) * zz(k,:)
+         theta(k,:) = t(k,:) / (1.0 + 1.61 * scalars(index_qv,k,:))
+
+      end do
+         call mpas_log_write('done interpolating sounding and computing base state')
+
+ 
+      sst(:) = 273.15
+      do i=1, nCells
+       ! Prescribe SST as a function of latitude
+        phi = latCell(i)
+
+        !Code below is for 'QOBS'
+        if (phi .ge. -pii/3. .and. phi .le. pii/3.) then
+          sst(i) = 273.15+0.5*( 27.*( 1.-sin((3./2.)*phi)**2 ) + 27.*( 1.-sin((3./2.)*phi)**4 ) ) !in Kelvins
+        end if
+
+!        Code below is for a profile w/ max at 10N and less peaked than QCONTROL
+!        if (phi .ge. pii/18. .and. phi .le. pii/3.) then
+!          sst(i) = 273.15+((28.*(1-sin((90./50*(phi-pii/18.)))**2.))+(28.*(1-sin((90./50*(phi-pii/18.)))**4.)))/2.
+!        else if (phi .ge. -pii/3. .and. phi .lt. pii/18.) then
+!          sst(i) = 273.15+((28.*(1-sin((90./70*(phi-pii/18.)))**2.))+(28.*(1-sin((90./70*(phi-pii/18.)))**4.)))/2.
+!        end if
+
+        !Code below is for SST profile as in Bellinger et al. (2015)
+!        phi = phi*45./atan(1.)
+!        if (phi .ge. 10.-70. .and. phi .le. 10.+70.) then
+!          sst(i) = 273.15+28.5*( 1.-0.5*(sin( pii*(phi-10.)/140.)**2. + sin(pii * (phi-10.)/140.)**4. ) ) 
+!        end if
+
+        skintemp(i) = sst(i) !skin temperature set as SST
+
+      200 format(4i6,8(1x,e15.8))
+      201 format(3i6,8(1x,e15.8))
+      202 format(2i6,10(1x,e15.8))
+      203 format(i6,10(1x,e15.8))
+
+        !calculation of surface pressure:
+        surface_pressure(i) = 0.5*dzw(1)*gravity                                    &
+                        * (1.25*(rr(1,i) + rb(1,i)) * (1. + scalars(index_qv,1,i))  &
+                        -  0.25*(rr(2,i) + rb(2,i)) * (1. + scalars(index_qv,2,i)))
+        surface_pressure(i) = surface_pressure(i) + pp(1,i) + ppb(1,i)
+
+      end do  ! end loop over cells
+      call mpas_log_write('done setting up SST profile') 
+
+
+
+      !!-----The following code is the same as in the jw test case -----!!
+
+      do iEdge=1,nEdges
+      !
+      ! Generate rotated Coriolis field
+      !
+
+         fEdge(iEdge) = 2.0 * omega_e * &
+                                       ( -cos(lonEdge(iEdge)) * cos(latEdge(iEdge)) * sin(alpha_grid) + &
+                                         sin(latEdge(iEdge)) * cos(alpha_grid) &
+                                       )
+      end do
+
+      do iVtx=1,nVertices
+         fVertex(iVtx) = 2.0 * omega_e * &
+                                         (-cos(lonVertex(iVtx)) * cos(latVertex(iVtx)) * sin(alpha_grid) + &
+                                          sin(latVertex(iVtx)) * cos(alpha_grid) &
+                                         )
+      end do
+
+      !
+      !  CALCULATION OF OMEGA, RW = ZX * RU + ZZ * RW
+      !
+
+      !
+      !     pre-calculation z-metric terms in omega eqn.
+      !
+      do iEdge = 1,nEdges
+         cell1 = cellsOnEdge(1,iEdge)
+         cell2 = cellsOnEdge(2,iEdge)
+
+         do k = 1, nVertLevels
+
+            if (config_theta_adv_order == 2) then
+
+               z_edge = (zgrid(k,cell1)+zgrid(k,cell2))/2.
+
+            else if (config_theta_adv_order == 3 .or. config_theta_adv_order ==4) then !theta_adv_order == 3 or 4 
+
+               d2fdx2_cell1 = deriv_two(1,1,iEdge) * zgrid(k,cell1)
+               d2fdx2_cell2 = deriv_two(1,2,iEdge) * zgrid(k,cell2)
+
+!  WCS fix 20120711
+
+                  do i=1, nEdgesOnCell(cell1)
+                     if ( cellsOnCell(i,cell1) > 0)       &
+                     d2fdx2_cell1 = d2fdx2_cell1 + deriv_two(i+1,1,iEdge) * zgrid(k,cellsOnCell(i,cell1))
+                  end do
+                  do i=1, nEdgesOnCell(cell2)
+                     if ( cellsOnCell(i,cell2) > 0)       &
+                     d2fdx2_cell2 = d2fdx2_cell2 + deriv_two(i+1,2,iEdge) * zgrid(k,cellsOnCell(i,cell2))
+                  end do             
+
+               z_edge =  0.5*(zgrid(k,cell1) + zgrid(k,cell2))         &
+                             - (dcEdge(iEdge) **2) * (d2fdx2_cell1 + d2fdx2_cell2) / 12.
+
+               if (config_theta_adv_order == 3) then
+                  z_edge3 =  - (dcEdge(iEdge) **2) * (d2fdx2_cell1 - d2fdx2_cell2) / 12.
+               else
+                  z_edge3 = 0.
+               end if
+
+            end if
+
+               zb(k,1,iEdge) = (z_edge-zgrid(k,cell1))*dvEdge(iEdge)/areaCell(cell1)
+               zb(k,2,iEdge) = (z_edge-zgrid(k,cell2))*dvEdge(iEdge)/areaCell(cell2)
+               zb3(k,1,iEdge)=  z_edge3*dvEdge(iEdge)/areaCell(cell1)
+               zb3(k,2,iEdge)=  z_edge3*dvEdge(iEdge)/areaCell(cell2)
+
+         end do
+
+      end do
+
+      do i=1,10
+        psurf = (cf1*(ppb(1,i)+pp(1,i)) + cf2*(ppb(2,i)+pp(2,i)) + cf3*(ppb(3,i)+pp(3,i)))/100.
+
+            psurf = (ppb(1,i)+pp(1,i)) + .5*dzw(1)*gravity        &
+                          *(1.25*(rr(1,i)+rb(1,i))*(1.+scalars(index_qv,1,i))   &
+                            -.25*(rr(2,i)+rb(2,i))*(1.+scalars(index_qv,2,i)))
+
+        call mpas_log_write(' i, psurf, lat = $i $r $r', intArgs=(/i/), realArgs=(/psurf,latCell(i)*180./3.1415828/))
+      end do
+
+   end subroutine init_atm_case_ape
+
 
 !----------------------------------------------------------------------------------------------------------
 
@@ -5041,12 +5593,13 @@ call mpas_log_write('Done with soil consistency check')
    end function env_qv
 
 
-   subroutine physics_idealized_init(mesh, fg)
+   subroutine physics_idealized_init(mesh, fg, test_case)
    
       implicit none
       
       type (mpas_pool_type), intent(inout) :: mesh
       type (mpas_pool_type), intent(inout) :: fg
+      integer, intent(in) :: test_case
       
       !local variables:
       integer :: iCell, iMonth, iSoil
@@ -5115,8 +5668,12 @@ call mpas_log_write('Done with soil consistency check')
          snowh(iCell) = 0.0
       
          !surface and sea-surface temperatures:
-         skintemp(iCell) = 288.0
-         sst(iCell) = 288.0
+         !RRB: if test_case == 0, don't do anything to SST because it will be specified
+         !     in the APE initialization code
+         if (test_case > 0) then
+           skintemp(iCell) = 288.0
+           sst(iCell) = 288.0
+         end if
       
          !soil layers:
          tmn(iCell) = 288.0
