@@ -520,12 +520,6 @@ module init_atm_cases
       dz = zt/float(nz1)
 
       !!----- RRB: this code is the same as in the jw test case -----!!
-      !!----- RRB 9/17/2018: trying to manually specify vertical levels ----!!
-
-!!      zc(:)  = (/0.0, 20.0, 80.0, 180.0, 320.0, 500.0, 720.0, 980.0, 1280.0, 1620.0, 2000.0,&
-!!                            2420.0, 2880.0, 3380.0, 3920.0, 4500.0, 5120.0, 5780.0, 6480.0, 7220.0, &
-!!                            8000.0, 8820.0, 9680.0, 10580.0, 11520.0, 12500.0, 13520.0, 14580.8, 15694.6,&
-!!                            16875.3, 18138.6, 19503.0, 20990.2, 22626.1, 24458.3, 26583.6, 29219.1, 32908.7, 39254.8/)
 
       do k=1,nz
 
@@ -614,14 +608,6 @@ module init_atm_cases
         end do
       end do
 
-      !do k=1,nz1
-      !  write(0,*) ' k, zgrid(k,1),hx(k,1) ',k,zgrid(k,1),hx(k,1)
-      !end do
-
-      !do k=1,nz1
-      !  write(0,*) ' k, zx(k,1) ',k,zx(k,1)
-      !end do
-
       call mpas_log_write(' grid metrics setup complete ')
 
       !!----- RRB: the following code was modified to implement a basic aquaplanet -----!!
@@ -661,10 +647,12 @@ module init_atm_cases
       call mpas_log_write('time to interpolate sounding')
 
       !Interpolate sounding to model levels - it's best to do this outside the loop for all points
+      !Reminder: tb is base state MOIST potential temperature; theta is potential temperature
+      !         & rho is DRY density
       do k=1,nz1
          ztemp    = .5*(zgrid(k+1,1)+zgrid(k,1)) !second index set to 1 b/c APE means same height everywhere
          if (ztemp < zsounding(1)) then !first level is below first sounding level
-           tb(k,:) = 0.5*(tsounding(1)+tsounding(2))+&
+           theta(k,:) = 0.5*(tsounding(1)+tsounding(2))+&
                      (tsounding(2)-tsounding(1))/(zsounding(2)-zsounding(1))*(ztemp-0.5*(zsounding(1)+zsounding(2)))
            scalars(index_qv,k,:) = 0.5*(qsounding(1)+qsounding(2))+&
                      (qsounding(2)-qsounding(1))/(zsounding(2)-zsounding(1))*(ztemp-0.5*(zsounding(1)+zsounding(2)))
@@ -672,7 +660,7 @@ module init_atm_cases
                      (psounding(2)-psounding(1))/(zsounding(2)-zsounding(1))*(ztemp-0.5*(zsounding(1)+zsounding(2)))
 
          else if (ztemp > zsounding(nz_sounding)) then !last level is above last sounding level
-           tb(k,:) = 0.5*(tsounding(nz_sounding-1)+tsounding(nz_sounding))+&
+           theta(k,:) = 0.5*(tsounding(nz_sounding-1)+tsounding(nz_sounding))+&
                      (tsounding(nz_sounding)-tsounding(nz_sounding-1))/(zsounding(nz_sounding)-zsounding(nz_sounding-1))*(ztemp-0.5*(zsounding(nz_sounding-1)+zsounding(nz_sounding)))
            scalars(index_qv,k,:) = 0.5*(qsounding(nz_sounding-1)+qsounding(nz_sounding))+&
                      (qsounding(nz_sounding)-qsounding(nz_sounding-1))/(zsounding(nz_sounding)-zsounding(nz_sounding-1))*(ztemp-0.5*(zsounding(nz_sounding-1)+zsounding(nz_sounding)))
@@ -683,32 +671,31 @@ module init_atm_cases
            kk = 1
 10         kk = kk+1
            if (zsounding(kk) < ztemp) go to 10
-           tb(k,:) = tsounding(kk-1)+(tsounding(kk)-tsounding(kk-1))/(zsounding(kk)-zsounding(kk-1))*(ztemp-zsounding(kk-1))
+           theta(k,:) = tsounding(kk-1)+(tsounding(kk)-tsounding(kk-1))/(zsounding(kk)-zsounding(kk-1))*(ztemp-zsounding(kk-1))
            ppb(k,:) = psounding(kk-1)+(psounding(kk)-psounding(kk-1))/(zsounding(kk)-zsounding(kk-1))*(ztemp-zsounding(kk-1))
            scalars(index_qv,k,:) = qsounding(kk-1)+(qsounding(kk)-qsounding(kk-1))/(zsounding(kk)-zsounding(kk-1))*(ztemp-zsounding(kk-1))
          end if
-
    
          !Calculate all other variables
+         tb(k,:) = theta(k,:)*(1._RKIND+rvord*scalars(index_qv,k,:))
          pb(k,:) = (ppb(k,:)/p0)**(rgas/cp)          !exner_base
-         rb(k,:) =  ppb(k,:)/(rgas*tb(k,:)*pb(k,:)*zz(k,:)) !rho_base [for some reason multiplied by zz]
+         rb(k,:) = (ppb(k,:)/p0)**(cv/cp)*(1.e5/rgas)/(tb(k,:)*zz(k,:)) !eq 8 of Skamarock et al.
+         !dividing by tb above b/c rb = dry air density
          rtb(k,:) = rb(k,:)*tb(k,:)
          p  (k,:) = pb(k,:)    
          pp (k,:) = 0.                                !pressure pert
          rr (k,:) = 0.                                !rho_pert         
 
-         tt(k) = tb(k,1)*pb(k,1)*(1.+1.61*scalars(index_qv,k,1))!using grid point 1, but should be the same everywhere
-         t (k,:) = tt(k)/p(k,:)
+         t (k,:) = theta(k,:)
          rt (k,:) = t(k,:)*rr(k,:)+rb(k,:)*(t(k,:)-tb(k,:))
          rho_zz (k,:) = rb(k,:) + rr(k,:)
          rho(k,:) = rho_zz(k,:) * zz(k,:)
-         theta(k,:) = t(k,:) / (1.0 + 1.61 * scalars(index_qv,k,:))
 
       end do
          call mpas_log_write('done interpolating sounding and computing base state')
 
  
-      sst(:) = 273.15
+      sst(:) = 273.15_RKIND
       do i=1, nCells
        ! Prescribe SST as a function of latitude
         phi = latCell(i)
@@ -5658,7 +5645,7 @@ call mpas_log_write('Done with soil consistency check')
          shdmax(iCell) = 0.0
          vegfra(iCell) = 0.0
          sfc_albbck(iCell) = 0.0
-         xland(iCell) = 0.0
+         xland(iCell) = 2.0 !0 = land, 2 = ocean
          seaice(iCell) = 0.0
       
          !snow coverage:
@@ -5673,6 +5660,7 @@ call mpas_log_write('Done with soil consistency check')
          if (test_case > 0) then
            skintemp(iCell) = 288.0
            sst(iCell) = 288.0
+           xland(iCell) = 0.0
          end if
       
          !soil layers:
